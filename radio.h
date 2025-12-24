@@ -92,6 +92,7 @@ typedef struct {
 
 extern radio_device_t radio_ft60;       // Yaesu FT-60R
 extern radio_device_t radio_vx2;        // Yaesu VX-2R, VX-2E
+extern radio_device_t radio_vx1;        // Yaesu VX-1R
 
 //
 // Radio: memory contents.

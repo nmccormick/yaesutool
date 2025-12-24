@@ -69,6 +69,30 @@ Reading configuration of VX-2R radio:
     Close device.
     Write image to file 'device.img'.
     Print configuration to file 'device.conf'.
+    
+Reading configuration of VX-1R radio:    
+
+    C:\> yaesutool -t vx1 COM5
+    Radio: Yaesu VX-1
+    Connect to /dev/ttyUSB1 at 19200 baud.
+    Read device: please follow the procedure.
+
+    1. Power Off the VX-1.
+    2. Hold down the F/W key and Power On the VX-1.
+       CLONE wil appear on the display.
+    3. Press the BAND key until the radio starts to send.
+    -- Or enter ^C to abort the memory read.
+
+    Waiting for data... ################################ done.
+    Close device.
+    Write image to file 'device.img'.
+    Print configuration to file 'device.conf'.
+    
+Get active port on Mac or Linux:
+    Use the command: ls /dev/tty.*
+    Look for the radio you have attached and use that as your port.
+    
+    Example: yaesutool -t vx1 /dev/ttyUSB1
 
 ## Configurations
 

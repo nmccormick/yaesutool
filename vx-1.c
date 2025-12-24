@@ -1,0 +1,317 @@
+/*
+ * Interface to Yaesu VX-1R.
+ *
+ * Modeled after VX-2.c to support read/write (clone) for the VX-1R.
+ * Focus: robust clone transport; model-specific parsing kept minimal.
+ *
+ * Copyright (C) 2025
+ * License: BSD-3-Clause (same style as VX-2.c)
+ */
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <stdint.h>
+#include "radio.h"
+#include "util.h"
+
+/* Why: VX-1R has a much smaller image than VX-2R; choose a safe default.
+ * Tune this if your checksum fails: increase/decrease empirically.
+ */
+#define MEMSZ           16383      /* data bytes, checksum stored at [MEMSZ] */
+
+/* Conservative assumptions carried over from VX-2 protocol.
+ * - Header [0..9] and [10..17] are sent first by the radio.
+ * - Bytes at [6],[7],[8],[13] carry the "Virtual Jumpers".
+ * - After header, the body starts at offset 18 and ends at MEMSZ, followed by checksum at [MEMSZ].
+ * - ACK scheme: after <=16 byte chunks, host sends 0x06 and expects 0x06 echo.
+ */
+
+static int read_block(int fd, int start, unsigned char *data, int datalen)
+{
+    unsigned char reply;
+    int len, nbytes;
+    int need_ack = (datalen <= 16);
+
+again:
+    nbytes = (datalen < 64) ? datalen : 64;
+    len = serial_read(fd, data, nbytes);
+    if (len != nbytes) {
+        if (start == 0)
+            return 0;
+        fprintf(stderr, "Reading block 0x%04x: got only %d bytes.\n", start, len);
+        exit(-1);
+    }
+
+    if (need_ack) {
+        /* Why: Radio expects per-chunk ACKs early in the stream (<=16B). */
+        serial_write(fd, "\x06", 1);
+        if (serial_read(fd, &reply, 1) != 1) {
+            fprintf(stderr, "No acknowledge after block 0x%04x.\n", start);
+            exit(-1);
+        }
+        if (reply != 0x06) {
+            fprintf(stderr, "Bad acknowledge after block 0x%04x: %02x\n", start, reply);
+            exit(-1);
+        }
+    }
+
+    if (serial_verbose) {
+        radio_progress += nbytes;
+        if (radio_progress % (16*64) == 0) {
+            fprintf(stderr, "#");
+            fflush(stderr);
+        }
+    }
+
+    if (nbytes < datalen) {
+        start += nbytes;
+        data += nbytes;
+        datalen -= nbytes;
+        goto again;
+    }
+    return 1;
+}
+
+static int write_block(int fd, int start, const unsigned char *data, int datalen)
+{
+    unsigned char reply[64];
+    int len, nbytes;
+    int need_ack = (datalen <= 16);
+
+again:
+    nbytes = (datalen < 64) ? datalen : 64;
+    serial_write(fd, data, nbytes);
+
+    len = serial_read(fd, reply, nbytes);
+    if (len != nbytes) {
+        fprintf(stderr, "! Echo for block 0x%04x: got only %d bytes.\n", start, len);
+        return 0;
+    }
+    if (memcmp(reply, data, nbytes) != 0) {
+        fprintf(stderr, "! Bad echo for block 0x%04x.\n", start);
+        return 0;
+    }
+
+    if (need_ack) {
+        if (serial_read(fd, reply, 1) != 1) {
+            fprintf(stderr, "! No acknowledge for block 0x%04x.\n", start);
+            return 0;
+        }
+        if (reply[0] != 0x06) {
+            fprintf(stderr, "! Bad acknowledge for block 0x%04x: %02x\n", start, reply[0]);
+            return 0;
+        }
+    }
+
+    if (serial_verbose) {
+        radio_progress += nbytes;
+        if (radio_progress % (16*64) == 0) {
+            fprintf(stderr, "#");
+            fflush(stderr);
+        }
+    }
+
+    if (nbytes < datalen) {
+        start += nbytes;
+        data += nbytes;
+        datalen -= nbytes;
+        usleep(60000);
+        goto again;
+    }
+    return 1;
+}
+
+static void vx1_print_version(FILE *out)
+{
+    /* no-op */
+}
+
+static void vx1_download()
+{
+    int addr, sum;
+
+    if (serial_verbose)
+        fprintf(stderr, "\nPlease follow the procedure:\n");
+    else
+        fprintf(stderr, "please follow the procedure.\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "1. Power Off the VX-1.\n");
+    fprintf(stderr, "2. Hold down the F/W key and Power On the VX-1.\n");
+    fprintf(stderr, "   CLONE will appear on the display.\n");
+    fprintf(stderr, "3. Press the BAND key until the radio starts to send.\n");
+    fprintf(stderr, "-- Or enter ^C to abort the memory read.\n");
+again:
+    fprintf(stderr, "\n");
+
+    radio_progress = 0;
+
+    /* Header stage 1: 10 bytes */
+    while (read_block(radio_port, 0, &radio_mem[0], 10) == 0) {
+        if (serial_verbose)
+            fprintf(stderr, ".");
+        usleep(100000);
+    }
+
+    /* Header stage 2: next 8 bytes */
+    while (read_block(radio_port, 10, &radio_mem[10], 8) == 0) {
+        if (serial_verbose)
+            fprintf(stderr, ".");
+        usleep(100000);
+    }
+
+    /* Body + checksum */
+    if (! read_block(radio_port, 18, &radio_mem[18], MEMSZ - 18 + 1)) {
+        fprintf(stderr, "Timeout; retrying...\n");
+        goto again;
+    }
+
+    /* Verify checksum. */
+    sum = 0;
+    for (addr = 0; addr < MEMSZ; addr++)
+        sum += radio_mem[addr];
+
+    if (sum != radio_mem[MEMSZ]) {
+        if (serial_verbose) {
+            printf("Bad checksum = %02x, expected %02x\n", sum, radio_mem[MEMSZ]);
+        } else {
+            fprintf(stderr, "bad checksum.\n");
+        }
+    } else {
+        if (serial_verbose) {
+            printf("Checksum = %02x (OK)\n", radio_mem[MEMSZ]);
+        }
+    }
+
+    serial_flush(radio_port);
+    usleep(200000);
+}
+
+static void vx1_upload()
+{
+    int addr, sum;
+
+    if (serial_verbose)
+        fprintf(stderr, "\nPlease follow the procedure:\n");
+    else
+        fprintf(stderr, "please follow the procedure.\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "1. Power Off the VX-1.\n");
+    fprintf(stderr, "2. Hold down the F/W key and Power On the VX-1.\n");
+    fprintf(stderr, "   CLONE will appear on the display.\n");
+    fprintf(stderr, "3. Press the BAND key until the radio starts to receive.\n");
+    fprintf(stderr, "-- Or enter ^C to abort the memory write.\n");
+    fprintf(stderr, "\n");
+
+    radio_progress = 0;
+
+    /* Preamble header */
+    if (! write_block(radio_port, 0, &radio_mem[0], 10)) {
+        fprintf(stderr, "Radio not ready, retrying...\n");
+        usleep(500000);
+    }
+    if (! write_block(radio_port, 10, &radio_mem[10], 8))
+        goto error;
+
+    /* Patch checksum at end of image. */
+    sum = 0;
+    for (addr = 0; addr < MEMSZ; addr++)
+        sum += radio_mem[addr];
+    radio_mem[MEMSZ] = sum;
+
+    usleep(500000);
+    if (! write_block(radio_port, 18, &radio_mem[18], MEMSZ - 18 + 1))
+        goto error;
+
+    usleep(200000);
+    return;
+
+error:
+    fprintf(stderr, "\nUpload failed. Reset the radio and try again.\n");
+}
+
+/* Conservative check: accept 'AH' header and expected virtual jumpers for VX‑1R.
+ * Why: VX-1R header signature isn't documented here; this avoids false negatives.
+ */
+static int vx1_is_compatible()
+{
+    int ok_hdr = (radio_mem[0] == 'A' && radio_mem[1] == 'H');
+    int a = radio_mem[6], b = radio_mem[7], c = radio_mem[8], d = radio_mem[13];
+    int ok_jmp = (a == 0xE0 && b == 0x02 && c == 0x02 && d == 0x01);
+    return ok_hdr && ok_jmp;
+}
+
+/* Minimal image I/O from/to a binary blob. */
+static void vx1_read_image(FILE *img)
+{
+    if (fread(&radio_mem[0], 1, MEMSZ + 1, img) != MEMSZ + 1) {
+        fprintf(stderr, "Error reading image data.\n");
+        exit(-1);
+    }
+}
+
+static void vx1_save_image(FILE *img)
+{
+    fwrite(&radio_mem[0], 1, MEMSZ + 1, img);
+}
+
+/* Text config printing (subset). */
+static void vx1_print_config(FILE *out, int verbose)
+{
+    fprintf(out, "Radio: Yaesu VX-1\n");
+    fprintf(out, "Virtual Jumpers: %02x %02x %02x %02x\n",
+        radio_mem[6], radio_mem[7], radio_mem[8], radio_mem[13]);
+
+    fprintf(out, "\n");
+    if (verbose) {
+        fprintf(out, "# Group 1 Memory Channels (52 max, with tones/splits)\n");
+        fprintf(out, "# Group 2 Memory Channels (142 max, simplex only)\n");
+        fprintf(out, "# (Channel decoding not implemented in this driver version.)\n");
+    }
+}
+
+/* Parser hooks: accept only a tiny header subset to set jumpers. */
+static void vx1_parse_parameter(char *name, char *value)
+{
+    unsigned a, b, c, d;
+    if (!name) return;
+    if (strncasecmp(name, "Virtual Jumpers", 15) == 0 && value) {
+        if (sscanf(value, "%x %x %x %x", &a, &b, &c, &d) == 4) {
+            radio_mem[6]  = (unsigned char) a;
+            radio_mem[7]  = (unsigned char) b;
+            radio_mem[8]  = (unsigned char) c;
+            radio_mem[13] = (unsigned char) d;
+        }
+    }
+}
+
+static int vx1_parse_header(char *line)
+{
+    /* No per-section parsing implemented; skip. */
+    return 0;
+}
+
+static int vx1_parse_row(int section, int index, char *line)
+{
+    (void)section; (void)index; (void)line;
+    return 0;
+}
+
+/* Register the device. 19200 on VX‑2; VX‑1 often uses lower speeds.
+ * 9600 is a safe default here.
+ */
+radio_device_t radio_vx1 = {
+    "Yaesu VX-1",
+    9600,
+    vx1_download,
+    vx1_upload,
+    vx1_is_compatible,
+    vx1_read_image,
+    vx1_save_image,
+    vx1_print_version,
+    vx1_print_config,
+    vx1_parse_parameter,
+    vx1_parse_header,
+    vx1_parse_row,
+};

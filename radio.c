@@ -72,6 +72,8 @@ void radio_connect(const char *port_name, const char *radio_type)
         device = &radio_ft60;
     } else if (strcasecmp("vx2", radio_type) == 0) {    // Yaesu VX-2R, VX-2E
         device = &radio_vx2;
+    }else if (strcasecmp("vx1", radio_type) == 0) {    // Yaesu VX-2R, VX-2E
+        device = &radio_vx1;
     }
 
     printf("Radio: %s\n", device->name);

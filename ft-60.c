@@ -1364,6 +1364,7 @@ static int parse_banks(int first_row, char *line)
         last = cnum;
         str = eptr + 1;
     }
+    (void)nchan;
     return 1;
 }
 
