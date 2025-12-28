@@ -4,6 +4,7 @@ programming cable.  Supported radios:
 
  * Yaesu FT-60R
  * Yaesu VX-2R
+ * Yaesu VX-1R
 
 Web site of the project: https://github.com/sergev/yaesutool
 
@@ -80,7 +81,7 @@ Reading configuration of VX-1R radio:
     1. Power Off the VX-1.
     2. Hold down the F/W key and Power On the VX-1.
        CLONE wil appear on the display.
-    3. Press the BAND key until the radio starts to send.
+    3. Press the DWN key until the radio starts to send.  The UP key to receive.
     -- Or enter ^C to abort the memory read.
 
     Waiting for data... ################################ done.
@@ -93,6 +94,8 @@ Get active port on Mac or Linux:
     Look for the radio you have attached and use that as your port.
     
     Example: yaesutool -t vx1 /dev/ttyUSB1
+    
+    Mine shows: /dev/tty.usbserial-RT3VN903
 
 ## Configurations
 

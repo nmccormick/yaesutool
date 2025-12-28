@@ -21,8 +21,6 @@
  */
 #define MEMSZ           16383      /* data bytes, checksum stored at [MEMSZ] */
 
-#define VX1_CHUNK      16         /* transfer handshake chunk size */
-
 /* Conservative assumptions carried over from VX-2 protocol.
  * - Header [0..9] and [10..17] are sent first by the radio.
  * - Bytes at [6],[7],[8],[13] carry the "Virtual Jumpers".
@@ -33,117 +31,120 @@
 static int read_block(int fd, int start, unsigned char *data, int datalen)
 {
     unsigned char reply;
+    int len, nbytes;
+    int need_ack = (datalen <= 16);
+    /* Be tolerant on header chunks: some units emit non-0x06 (e.g., 0x80) */
     int tolerant_phase = (start == 0 || start == 10);
-    int remaining = datalen;
-    int offset = 0;
 
-    while (remaining > 0) {
-        int nbytes = (remaining > VX1_CHUNK) ? VX1_CHUNK : remaining;
-        int len = serial_read(fd, data + offset, nbytes);
-
-        if (len != nbytes) {
-            if (start == 0)
-                return 0;
-            fprintf(stderr, "Reading block 0x%04x: got only %d bytes.\n", start + offset, len);
-            exit(-1);
-        }
-
-        /* Host ACK */
-        serial_write(fd, "\x06", 1);
-
-        /* Expect ACK echo; tolerate odd bytes during header phases. */
-        {
-            int tries = 0;
-            int got = 0;
-            while (tries < 3) {
-                if (serial_read(fd, &reply, 1) == 1) { got = 1; break; }
-                usleep(50000);
-                tries++;
-            }
-            if (got) {
-                if (reply != 0x06 && !tolerant_phase && reply != (unsigned char)0x80) {
-                    fprintf(stderr, "Bad acknowledge after block 0x%04x: %02x\n", start + offset, reply);
-                    exit(-1);
-                }
-                /* Tolerate 0x80 or other bytes in header phase. */
-            } else if (!tolerant_phase) {
-                fprintf(stderr, "No acknowledge after block 0x%04x.\n", start + offset);
-                exit(-1);
-            }
-        }
-
-        if (serial_verbose) {
-            radio_progress += nbytes;
-            if (radio_progress % (16*64) == 0) {
-                fprintf(stderr, "#");
-                fflush(stderr);
-            }
-        }
-
-        offset += nbytes;
-        remaining -= nbytes;
-        usleep(60000);
+again:
+    nbytes = (datalen < 64) ? datalen : 64;
+    len = serial_read(fd, data, nbytes);
+    if (len != nbytes) {
+        if (start == 0)
+            return 0;
+        fprintf(stderr, "Reading block 0x%04x: got only %d bytes.\n", start, len);
+        exit(-1);
     }
 
+    if (need_ack) {
+        /* Some VX-1R units respond with 0x80 or nothing on header chunks. */
+        serial_write(fd, "\x06", 1);
+        int tries = 0;
+        int got = 0;
+        while (tries < 3) {
+            if (serial_read(fd, &reply, 1) == 1) { got = 1; break; }
+            usleep(50000);
+            tries++;
+        }
+        if (!got) {
+            if (!tolerant_phase) {
+                fprintf(stderr, "No acknowledge after block 0x%04x.\n", start);
+                exit(-1);
+            }
+            /* Tolerate missing ACK during header. */
+        } else if (reply != 0x06) {
+            if (!tolerant_phase && reply != (unsigned char)0x80) {
+                fprintf(stderr, "Bad acknowledge after block 0x%04x: %02x\n", start, reply);
+                exit(-1);
+            }
+            /* Tolerate 0x80 or other bytes in header phase. */
+        }
+    }
+
+    if (serial_verbose) {
+        radio_progress += nbytes;
+        if (radio_progress % (16*64) == 0) {
+            fprintf(stderr, "#");
+            fflush(stderr);
+        }
+    }
+
+    if (nbytes < datalen) {
+        start += nbytes;
+        data += nbytes;
+        datalen -= nbytes;
+        goto again;
+    }
     return 1;
 }
 
 static int write_block(int fd, int start, const unsigned char *data, int datalen)
 {
-    unsigned char reply[VX1_CHUNK];
-    unsigned char ack;
+    unsigned char reply[64];
+    int len, nbytes;
+    int need_ack = (datalen <= 16);
     int tolerant_phase = (start == 0 || start == 10);
-    int remaining = datalen;
-    int offset = 0;
 
-    while (remaining > 0) {
-        int nbytes = (remaining > VX1_CHUNK) ? VX1_CHUNK : remaining;
-        int len;
+again:
+    nbytes = (datalen < 64) ? datalen : 64;
+    serial_write(fd, data, nbytes);
 
-        serial_write(fd, data + offset, nbytes);
+    len = serial_read(fd, reply, nbytes);
+    if (len != nbytes) {
+        fprintf(stderr, "! Echo for block 0x%04x: got only %d bytes.\n", start, len);
+        return 0;
+    }
+    if (memcmp(reply, data, nbytes) != 0) {
+        fprintf(stderr, "! Bad echo for block 0x%04x.\n", start);
+        return 0;
+    }
 
-        len = serial_read(fd, reply, nbytes);
-        if (len != nbytes) {
-            fprintf(stderr, "! Echo for block 0x%04x: got only %d bytes.\n", start + offset, len);
-            return 0;
+    if (need_ack) {
+        int tries = 0;
+        int got = 0;
+        while (tries < 3) {
+            if (serial_read(fd, reply, 1) == 1) { got = 1; break; }
+            usleep(50000);
+            tries++;
         }
-        if (memcmp(reply, data + offset, nbytes) != 0) {
-            fprintf(stderr, "! Bad echo for block 0x%04x.\n", start + offset);
-            return 0;
-        }
-
-        {
-            int tries = 0;
-            int got = 0;
-            while (tries < 3) {
-                if (serial_read(fd, &ack, 1) == 1) { got = 1; break; }
-                usleep(50000);
-                tries++;
+        if (!got) {
+            if (!tolerant_phase) {
+                fprintf(stderr, "! No acknowledge for block 0x%04x.\n", start);
+                return 0;
             }
-            if (got) {
-                if (ack != 0x06 && !tolerant_phase && ack != (unsigned char)0x80) {
-                    fprintf(stderr, "! Bad acknowledge for block 0x%04x: %02x\n", start + offset, ack);
-                    return 0;
-                }
-            } else if (!tolerant_phase) {
-                fprintf(stderr, "! No acknowledge for block 0x%04x.\n", start + offset);
+        } else if (reply[0] != 0x06) {
+            if (!tolerant_phase && reply[0] != (unsigned char)0x80) {
+                fprintf(stderr, "! Bad acknowledge for block 0x%04x: %02x\n", start, reply[0]);
                 return 0;
             }
         }
-
-        if (serial_verbose) {
-            radio_progress += nbytes;
-            if (radio_progress % (16*64) == 0) {
-                fprintf(stderr, "#");
-                fflush(stderr);
-            }
-        }
-
-        offset += nbytes;
-        remaining -= nbytes;
-        usleep(60000);
     }
 
+    if (serial_verbose) {
+        radio_progress += nbytes;
+        if (radio_progress % (16*64) == 0) {
+            fprintf(stderr, "#");
+            fflush(stderr);
+        }
+    }
+
+    if (nbytes < datalen) {
+        start += nbytes;
+        data += nbytes;
+        datalen -= nbytes;
+        usleep(60000);
+        goto again;
+    }
     return 1;
 }
 
@@ -260,15 +261,9 @@ error:
  */
 static int vx1_is_compatible()
 {
-    int ok_hdr =
-        (radio_mem[0] == 'A' && radio_mem[1] == 'H') ||
-        (radio_mem[0] == (unsigned char)0xE0 &&
-         radio_mem[1] == (unsigned char)0xE0 &&
-         radio_mem[2] == (unsigned char)0x03);
-
+    int ok_hdr = (radio_mem[0] == 'A' && radio_mem[1] == 'H');
     int a = radio_mem[6], b = radio_mem[7], c = radio_mem[8], d = radio_mem[13];
     int ok_jmp = (a == 0xE0 && b == 0x02 && c == 0x02 && d == 0x01);
-
     return ok_hdr && ok_jmp;
 }
 

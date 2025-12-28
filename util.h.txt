@@ -51,21 +51,6 @@ extern const char *copyright;
 extern int serial_verbose;
 
 //
-// Serial port defaults/tuning for Yaesu clone protocols.
-// Override by defining these macros at compile time.
-//
-#ifndef SERIAL_STOP_BITS
-#define SERIAL_STOP_BITS 2
-#endif
-#ifndef SERIAL_RAISE_DTR
-#define SERIAL_RAISE_DTR 1
-#endif
-#ifndef SERIAL_RAISE_RTS
-#define SERIAL_RAISE_RTS 1
-#endif
-
-
-//
 // CTCSS tones, Hz*10.
 //
 #define NCTCSS  50

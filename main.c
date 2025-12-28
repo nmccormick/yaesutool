@@ -60,6 +60,7 @@ void usage()
     fprintf(stderr, _("    -t type      Type of radio:\n"));
     fprintf(stderr, _("                 ft60 - Yaesu FT-60R\n"));
     fprintf(stderr, _("                 vx2  - Yaesu VX-2R, VX-2E\n"));
+    fprintf(stderr, _("                 vx1  - Yaesu VX-1R\n"));
     exit(-1);
 }
 
